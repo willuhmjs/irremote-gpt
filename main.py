@@ -665,6 +665,9 @@ def main():
     ts_parser.add_argument('--context_code', required=True, help='Hex code of known button')
     ts_parser.add_argument('--target_btn', required=True, help='Name of button to predict')
     
+    # Wizard
+    subparsers.add_parser('wizard', help='Run interactive generation wizard')
+
     args = parser.parse_args()
     
     if args.command == 'prep':
@@ -677,6 +680,9 @@ def main():
         run_test()
     elif args.command == 'test-single':
         run_test_single(args.protocol, args.address, args.context_btn, args.context_code, args.target_btn)
+    elif args.command == 'wizard':
+        from interactive import run_wizard
+        run_wizard()
     else:
         parser.print_help()
 
