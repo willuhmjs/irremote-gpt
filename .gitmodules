@@ -1,0 +1,18 @@
+[submodule "databases/UberGuidoZ_Flipper"]
+	path = databases/UberGuidoZ_Flipper
+	url = https://github.com/UberGuidoZ/Flipper.git
+[submodule "databases/DarkFlippers_Unleashed"]
+	path = databases/DarkFlippers_Unleashed
+	url = https://github.com/DarkFlippers/unleashed-firmware.git
+[submodule "databases/LogickWorkshop_Flipper-IRDB"]
+	path = databases/LogickWorkshop_Flipper-IRDB
+	url = https://github.com/LogickWorkshop/Flipper-IRDB.git
+[submodule "databases/djsime1_awesome-flipperzero"]
+	path = databases/djsime1_awesome-flipperzero
+	url = https://github.com/djsime1/awesome-flipperzero.git
+[submodule "databases/ahumeniy_flipperzero-universal-remote-extra"]
+	path = databases/ahumeniy_flipperzero-universal-remote-extra
+	url = https://github.com/ahumeniy/flipperzero-universal-remote-extra.git
+[submodule "databases/Lucaslhm_Flipper-IRDB"]
+	path = databases/Lucaslhm_Flipper-IRDB
+	url = https://github.com/Lucaslhm/Flipper-IRDB.git

@@ -38,7 +38,7 @@ class Config:
     vocab_path = 'vocab.json'
     model_path = 'model.pt'
     test_data_dir = 'test_data'
-    irdb_dir = 'IRDB'
+    irdb_dirs = ['IRDB', 'databases']
     
     # Generation
     temperature = 0.8
@@ -293,22 +293,24 @@ def process_file_content(content):
 
 def run_prep_data():
     out_lines = []
-    if not os.path.exists(Config.irdb_dir):
-        print(f"Directory {Config.irdb_dir} not found.")
-        return
-    print(f"Scanning {Config.irdb_dir}...")
-    count = 0
-    for root, dirs, files in os.walk(Config.irdb_dir):
-        for file in files:
-            if file.endswith('.ir'):
-                try:
-                    with open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
-                        res = process_file_content(f.read())
-                    if res:
-                        out_lines.append(res)
-                        count += 1
-                except Exception as e: print(f"Error processing {file}: {e}")
     
+    for d in Config.irdb_dirs:
+        if not os.path.exists(d):
+            print(f"Directory {d} not found. Skipping.")
+            continue
+            
+        print(f"Scanning {d}...")
+        for root, dirs, files in os.walk(d):
+            for file in files:
+                if file.endswith('.ir'):
+                    try:
+                        with open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
+                            res = process_file_content(f.read())
+                        if res:
+                            out_lines.append(res)
+                    except Exception as e: print(f"Error processing {file}: {e}")
+    
+    count = len(out_lines)
     full_text = "\n".join(out_lines)
     with open(Config.train_data_path, 'w', encoding='utf-8') as f: f.write(full_text)
     print(f"Processed {count} remotes. Saved to {Config.train_data_path}.")
@@ -436,26 +438,40 @@ def run_generate(protocol, address, known_btn, known_code, output_file):
 # ==========================================
 # TEST
 # ==========================================
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
 def run_test():
-    if not Levenshtein: print("Install python-Levenshtein for metrics."); return
+    if not Levenshtein: 
+        print(f"{Colors.WARNING}python-Levenshtein not found. Distance metrics will be unavailable.{Colors.ENDC}")
     
     tok = Tokenizer(Config.vocab_path)
     if not tok.load_vocab(): return
     
-    if not os.path.exists(Config.model_path): print("No model."); return
+    if not os.path.exists(Config.model_path): 
+        print("No model."); return
+        
     model = GPT(len(tok.stoi))
     model.load_state_dict(torch.load(Config.model_path, map_location=Config.device))
     model.to(Config.device)
     model.eval()
     
     files = [os.path.join(Config.test_data_dir, f) for f in os.listdir(Config.test_data_dir) if f.endswith('.ir')]
-    if not files: print("No test files."); return
+    if not files: 
+        print("No test files."); return
     
     for fp in sorted(files):
-        print(f"\nTesting {fp}")
+        print(f"\n{Colors.HEADER}TESTING: {os.path.basename(fp)}{Colors.ENDC}")
         with open(fp, 'r') as f: content = f.read()
         
-        # Quick parse
+        # Parse
         buttons = []
         proto = addr = None
         for sec in content.split('#'):
@@ -470,39 +486,152 @@ def run_test():
                 t = normalize_button(name)
                 if t: buttons.append((t, cmd))
         
-        if not buttons: continue
+        if not buttons: 
+            print(f"{Colors.FAIL}No valid buttons found.{Colors.ENDC}")
+            continue
         
-        # Test Loop
+        print(f"Protocol: {Colors.BOLD}{proto}{Colors.ENDC}, Address: {Colors.BOLD}{addr}{Colors.ENDC}")
+        print(f"{'Context':<5} | {'Target Btn':<15} | {'Pred Code':<15} | {'Real Code':<15} | {'Status':<10}")
+        print("-" * 75)
+        
         total_dist = 0
         exact = 0
         steps = 0
-        print(f"{'Prog':<5} | {'Last':<15} | {'Pred':<15} | {'Real':<15} | {'Dist':<5}")
         
         for i in range(1, len(buttons)):
             ctx = buttons[:i]
             target_t, target_c = buttons[i]
             
-            prompt = f"<BOS> PROTOCOL:{proto} ADDRESS:{addr} " + " ".join([f"{t}:{c}" for t,c in ctx]) + " "
+            # TEACHER FORCING PROMPT
+            # <BOS> PROTOCOL:NEC ADDRESS:0400... [BTN_POWER]:CMD ... [BTN_TARGET]:
+            # NOTE: We construct the prompt manually but ensure spaces are correct for tokenizer
+            prompt = f"<BOS> PROTOCOL:{proto} ADDRESS:{addr} " + " ".join([f"{t}:{c}" for t,c in ctx]) + f" {target_t}:"
+            
             x = torch.tensor(tok.encode(prompt), dtype=torch.long, device=Config.device)[None, ...]
             
             with torch.no_grad():
-                out = model.generate(x, 50, top_k=50)
+                # We only need enough tokens for the hex code (approx 8 chars + potential spaces)
+                out = model.generate(x, 20, top_k=1)
             
-            gen_txt = tok.decode(out[0].tolist())[len(prompt):]
-            match = re.search(r'(\[BTN_[^\]]+\]):([0-9A-Fa-f]+)', gen_txt)
+            # Decode: Tokenizer might not handle partial spaces well, so we decode full then slice
+            full_gen = tok.decode(out[0].tolist())
+            
+            # Find the target button in the generated string.
+            # We expect the prompt to end with "{target_t}:"
+            # But the tokenizer might encode "{target_t}:" as multiple tokens or one depending on vocab.
+            # Robust way: Search for "{target_t}:" from the right side of the prompt area.
+            
+            try:
+                # Find the LAST occurrence of the target button label in the full text
+                # This handles cases where prompt reconstruction might be slightly off vs decoding
+                start_marker = f"{target_t}:"
+                start_idx = full_gen.rindex(start_marker) + len(start_marker)
+                gen_txt = full_gen[start_idx:].strip()
+            except ValueError:
+                # Fallback: just slice by length (riskier if token decoding adds spaces)
+                 gen_txt = full_gen[len(prompt):].strip()
+
+            # Regex to find first hex sequence
+            match = re.match(r'([0-9A-Fa-f\s]+)', gen_txt)
+            
+            pred_code = "???"
+            dist = 999
+            is_match = False
             
             if match:
-                pt, pc = match.group(1), match.group(2).upper()
-                tc = target_c.upper()
-                dist = Levenshtein.distance(pc, tc)
-                total_dist += dist
-                if pc == tc: exact += 1
-                print(f"{int(i/len(buttons)*100)}%   | {ctx[-1][0]:<15} | {pt:<15} | {target_t:<15} | {dist}")
+                # clean up spaces
+                raw_hex = match.group(1).replace(" ", "")
+                pred_code = raw_hex[:8].upper() 
+                
+                target_c_clean = target_c.replace(" ", "").upper()
+                
+                if Levenshtein:
+                    dist = Levenshtein.distance(pred_code, target_c_clean)
+                else:
+                    dist = 0 if pred_code == target_c_clean else 1
+                
+                is_match = (pred_code == target_c_clean)
+                
+            status = f"{Colors.OKGREEN}MATCH{Colors.ENDC}" if is_match else f"{Colors.FAIL}Diff({dist}){Colors.ENDC}"
+            if is_match: exact += 1
+            total_dist += dist
+            
+            print(f"{i:<5} | {target_t:<15} | {pred_code:<15} | {target_c:<15} | {status}")
             steps += 1
         
         if steps:
-            print(f"Exact Code Match: {exact}/{steps} ({exact/steps*100:.1f}%) | Avg Dist: {total_dist/steps:.2f}")
+            acc = (exact / steps) * 100
+            avg_d = total_dist / steps
+            print(f"\n{Colors.BOLD}Summary:{Colors.ENDC} Accuracy: {acc:.1f}% | Avg Dist: {avg_d:.2f}")
 
+
+def run_test_single(protocol, address, context_btn, context_code, target_btn):
+    print(f"Testing Single Prediction: {target_btn}")
+    
+    tok = Tokenizer(Config.vocab_path)
+    if not tok.load_vocab(): return
+    
+    if not os.path.exists(Config.model_path):
+        print("Model not found.")
+        return
+        
+    model = GPT(len(tok.stoi))
+    model.load_state_dict(torch.load(Config.model_path, map_location=Config.device))
+    model.to(Config.device)
+    model.eval()
+    
+    # Normalize buttons
+    ctx_token = normalize_button(context_btn)
+    tgt_token = normalize_button(target_btn)
+    
+    if not ctx_token:
+        print(f"Error: Unknown context button name '{context_btn}'")
+        return
+    if not tgt_token:
+        print(f"Error: Unknown target button name '{target_btn}'")
+        return
+
+    # Clean code
+    ctx_code = context_code.replace(" ", "").upper()
+    addr = address.replace(" ", "").upper()
+    
+    # Construct Prompt
+    # <BOS> PROTOCOL:NEC ADDRESS:0400 [BTN_POWER]:CMD [BTN_TARGET]:
+    prompt = f"<BOS> PROTOCOL:{protocol} ADDRESS:{addr} {ctx_token}:{ctx_code} {tgt_token}:"
+    print(f"Prompt: {prompt}")
+    
+    ids = tok.encode(prompt)
+    if not ids: 
+        print("Error: Could not encode prompt.")
+        return
+        
+    x = torch.tensor(ids, dtype=torch.long, device=Config.device)[None, ...]
+    
+    with torch.no_grad():
+        # Generate enough tokens for the hex code
+        out_ids = model.generate(x, 20, temperature=Config.temperature, top_k=Config.top_k)
+    
+    generated = tok.decode(out_ids[0].tolist())
+    
+    # Extract result
+    # We look for the part after our prompt
+    try:
+        start_marker = f"{tgt_token}:"
+        # Find the last occurrence to be safe
+        start_idx = generated.rindex(start_marker) + len(start_marker)
+        gen_txt = generated[start_idx:].strip()
+        
+        # Regex for hex code
+        match = re.match(r'([0-9A-Fa-f]+)', gen_txt)
+        if match:
+            pred_code = match.group(1).upper()
+            print(f"Predicted Code for {target_btn}: {Colors.OKGREEN}{pred_code}{Colors.ENDC}")
+        else:
+            print(f"Predicted Code for {target_btn}: {Colors.FAIL}No hex found ({gen_txt}){Colors.ENDC}")
+            
+    except ValueError:
+        print(f"Error: Could not find target marker in output.")
+        print(f"Raw Output: {generated}")
 
 # ==========================================
 # MAIN ENTRY POINT
@@ -527,6 +656,14 @@ def main():
     
     # Test
     subparsers.add_parser('test', help='Test model on test_data')
+
+    # Test Single
+    ts_parser = subparsers.add_parser('test-single', help='Predict a single button code')
+    ts_parser.add_argument('--protocol', required=True)
+    ts_parser.add_argument('--address', required=True)
+    ts_parser.add_argument('--context_btn', required=True, help='Name of known button')
+    ts_parser.add_argument('--context_code', required=True, help='Hex code of known button')
+    ts_parser.add_argument('--target_btn', required=True, help='Name of button to predict')
     
     args = parser.parse_args()
     
@@ -538,6 +675,8 @@ def main():
         run_generate(args.protocol, args.address, args.known_btn, args.known_code, args.output)
     elif args.command == 'test':
         run_test()
+    elif args.command == 'test-single':
+        run_test_single(args.protocol, args.address, args.context_btn, args.context_code, args.target_btn)
     else:
         parser.print_help()
 
